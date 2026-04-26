@@ -99,6 +99,33 @@ func (a *Agent) registerTools() {
 		},
 	})
 	a.toolHandlers["list_files"] = listFilesTool
+
+	a.tools = append(a.tools, openai.Tool{
+		Type: openai.ToolTypeFunction,
+		Function: &openai.FunctionDefinition{
+			Name:        "edit_file",
+			Description: "Replace old_text with new_text in the given file. If the file does not exist, it will be created with new_text as its content.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path": map[string]any{
+						"type":        "string",
+						"description": "Relative path to the file to edit or create",
+					},
+					"old_text": map[string]any{
+						"type":        "string",
+						"description": "Text to find and replace. Leave empty when creating a new file.",
+					},
+					"new_text": map[string]any{
+						"type":        "string",
+						"description": "Text to replace old_text with, or the full content when creating a new file.",
+					},
+				},
+				"required": []string{"path", "new_text"},
+			},
+		},
+	})
+	a.toolHandlers["edit_file"] = editFileTool
 }
 
 const maxFileBytes = 32 * 1024 // 32 KB
@@ -117,6 +144,7 @@ func readFileTool(input map[string]any) (string, error) {
 		return "", fmt.Errorf("read_file: %w", err)
 	}
 	if info.Size() > maxFileBytes {
+		fmt.Printf("Max file size exceeded: %d bytes (limit: %d bytes)\n", info.Size(), maxFileBytes)
 		return fmt.Sprintf("%s\n\n[truncated: file is %d bytes, showing first %d bytes]",
 			string(data[:maxFileBytes]), info.Size(), maxFileBytes), nil
 	}
@@ -141,6 +169,48 @@ func listFilesTool(input map[string]any) (string, error) {
 		}
 	}
 	return sb.String(), nil
+}
+
+func editFileTool(input map[string]any) (string, error) {
+	path, ok := input["path"].(string)
+	if !ok || path == "" {
+		return "", fmt.Errorf("edit_file: missing required parameter 'path'")
+	}
+	newText, ok := input["new_text"].(string)
+	if !ok {
+		return "", fmt.Errorf("edit_file: missing required parameter 'new_text'")
+	}
+
+	_, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		if err := os.WriteFile(path, []byte(newText), 0644); err != nil {
+			return "", fmt.Errorf("edit_file: %w", err)
+		}
+		return fmt.Sprintf("created %s", path), nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("edit_file: %w", err)
+	}
+
+	oldText, _ := input["old_text"].(string)
+	if oldText == "" {
+		if err := os.WriteFile(path, []byte(newText), 0644); err != nil {
+			return "", fmt.Errorf("edit_file: %w", err)
+		}
+		return fmt.Sprintf("overwrote %s", path), nil
+	}
+
+	original := string(data)
+	if !strings.Contains(original, oldText) {
+		return "", fmt.Errorf("edit_file: old_text not found in %s", path)
+	}
+	updated := strings.Replace(original, oldText, newText, 1)
+	if err := os.WriteFile(path, []byte(updated), 0644); err != nil {
+		return "", fmt.Errorf("edit_file: %w", err)
+	}
+	return fmt.Sprintf("edited %s", path), nil
 }
 
 func (a *Agent) Run(ctx context.Context) error {
